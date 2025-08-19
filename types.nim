@@ -12,6 +12,7 @@ type
     color*: PieceColor
     x*, y*: int
     dragging*: bool
+    hasMoved*: bool  # novo campo para controlar roque
 
   PromotionButton* = object
     rect*: Rectangle

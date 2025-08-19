@@ -20,12 +20,12 @@ proc initializeGame*() =
   ]
   
   for (kind, x) in pieceSetup:
-    gameState.pieces.add(Piece(kind: kind, color: Dark, x: x, y: 0))
-    gameState.pieces.add(Piece(kind: kind, color: White, x: x, y: 7))
+    gameState.pieces.add(Piece(kind: kind, color: Dark, x: x, y: 0, hasMoved: false))
+    gameState.pieces.add(Piece(kind: kind, color: White, x: x, y: 7, hasMoved: false))
     
   for x in 0..7:
-    gameState.pieces.add(Piece(kind: Pawn, color: Dark, x: x, y: 1))
-    gameState.pieces.add(Piece(kind: Pawn, color: White, x: x, y: 6))
+    gameState.pieces.add(Piece(kind: Pawn, color: Dark, x: x, y: 1, hasMoved: false))
+    gameState.pieces.add(Piece(kind: Pawn, color: White, x: x, y: 6, hasMoved: false))
 
 proc getAdjustedGridPosition(mousePos: Vector2, squareSize: Vector2): tuple[x, y: int] =
   let rawX = int(mousePos.x / squareSize.x)
@@ -85,6 +85,39 @@ proc evaluateCurrentPosition(): float =
     return currentMoves[0].score
   return 0.0
 
+proc isPathClear(fromX, toX, y: int): bool =
+  let start = min(fromX, toX) + 1
+  let finish = max(fromX, toX)
+  
+  for x in start..<finish:
+    if findPieceAt(x, y) != nil:
+      return false
+  return true
+
+proc handleCastling(king: Piece, fromX, toX: int): bool =
+  if king.kind != King or king.hasMoved:
+    return false
+    
+  # Roque é um movimento de 2 casas
+  if abs(toX - fromX) != 2:
+    return false
+    
+  let y = king.y
+  let rookX = if toX > fromX: 7 else: 0  # Torre da direita ou esquerda
+  let rook = findPieceAt(rookX, y)
+  
+  if rook == nil or rook.kind != Rook or rook.hasMoved:
+    return false
+    
+  if not isPathClear(fromX, rookX, y):
+    return false
+    
+  # Mover a torre
+  let newRookX = if toX > fromX: toX - 1 else: toX + 1
+  rook.x = newRookX
+  rook.hasMoved = true
+  return true
+
 proc handleInput*(squareSize: Vector2) =
   let mousePos = getMousePosition()
   let (gridX, gridY) = getAdjustedGridPosition(mousePos, squareSize)
@@ -117,6 +150,20 @@ proc handleInput*(squareSize: Vector2) =
       let oldX = movingPiece.x
       let oldY = movingPiece.y
       
+      # Tentar fazer roque se for o rei
+      if movingPiece.kind == King and not movingPiece.hasMoved:
+        if handleCastling(movingPiece, oldX, gridX):
+          movingPiece.x = gridX
+          movingPiece.y = gridY
+          movingPiece.hasMoved = true
+          movingPiece.dragging = false
+          gameState.draggedPiece = nil
+          
+          # Trocar turno e analisar posição
+          gameState.currentTurn = if gameState.currentTurn == White: Dark else: White
+          gameState.suggestedMoves = getBestMoves(gameState)
+          return
+
       # Verificar se o movimento é válido
       if not isValidMove(movingPiece, oldX, oldY, gridX, gridY):
         movingPiece.dragging = false
