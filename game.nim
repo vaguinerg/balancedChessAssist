@@ -20,12 +20,12 @@ proc initializeGame*() =
   ]
   
   for (kind, x) in pieceSetup:
-    gameState.pieces.add(Piece(kind: kind, color: Dark, x: x, y: 0, hasMoved: false))
-    gameState.pieces.add(Piece(kind: kind, color: White, x: x, y: 7, hasMoved: false))
+    gameState.pieces.add(Piece(kind: kind, color: Dark, x: x, y: 0))
+    gameState.pieces.add(Piece(kind: kind, color: White, x: x, y: 7))
     
   for x in 0..7:
-    gameState.pieces.add(Piece(kind: Pawn, color: Dark, x: x, y: 1, hasMoved: false))
-    gameState.pieces.add(Piece(kind: Pawn, color: White, x: x, y: 6, hasMoved: false))
+    gameState.pieces.add(Piece(kind: Pawn, color: Dark, x: x, y: 1))
+    gameState.pieces.add(Piece(kind: Pawn, color: White, x: x, y: 6))
 
 proc getAdjustedGridPosition(mousePos: Vector2, squareSize: Vector2): tuple[x, y: int] =
   let rawX = int(mousePos.x / squareSize.x)
@@ -64,15 +64,64 @@ proc createPromotionButtons(piece: Piece) =
       kind: kind
     ))
 
-proc isValidMove(piece: Piece, fromX, fromY, toX, toY: int): bool =
+proc isValidCastling(king: Piece, fromX, fromY, toX, toY: int): bool =
+  # Verificar se é roque (rei move 2 casas horizontalmente)
+  if abs(toX - fromX) != 2 or toY != fromY:
+    return false
+  
+  # Determinar se é roque do lado do rei (kingside) ou da rainha (queenside)
+  let isKingside = toX > fromX
+  let rookX = if isKingside: 7 else: 0
+  let rookNewX = if isKingside: toX - 1 else: toX + 1
+  
+  # Verificar se a torre está na posição correta
+  let rook = findPieceAt(rookX, fromY)
+  if rook == nil or rook.kind != Rook or rook.color != king.color:
+    echo "Roque inválido: torre não encontrada em (", rookX, ",", fromY, ")"
+    return false
+  
+  # Verificar se o caminho está livre
+  let startX = min(fromX, rookX) + 1
+  let endX = max(fromX, rookX) - 1
+  
+  for x in startX..endX:
+    if findPieceAt(x, fromY) != nil:
+      echo "Roque inválido: caminho bloqueado em (", x, ",", fromY, ")"
+      return false
+  
+  # TODO: Verificar se rei ou torre já se moveram (precisaria de histórico)
+  # TODO: Verificar se rei está em xeque ou passa por casa atacada
+  
+  echo "Roque válido detectado: ", if isKingside: "lado do rei" else: "lado da rainha"
+  return true
+
+proc executeCastling(king: Piece, toX: int) =
+  # Determinar posições da torre
+  let isKingside = toX > king.x
+  let rookX = if isKingside: 7 else: 0
+  let rookNewX = if isKingside: toX - 1 else: toX + 1
+  
+  # Encontrar a torre
+  let rook = findPieceAt(rookX, king.y)
+  if rook != nil:
+    echo "Executando roque: Torre de (", rookX, ",", king.y, ") para (", rookNewX, ",", king.y, ")"
+    rook.x = rookNewX
+  else:
+    echo "ERRO: Torre não encontrada durante execução do roque!"
+
+proc isValidMove(king: Piece, fromX, fromY, toX, toY: int): bool =
   # Verificação básica de limites
   if toX < 0 or toX > 7 or toY < 0 or toY > 7:
     return false
   
   # Não pode mover para onde já tem peça da mesma cor
   let targetPiece = findPieceAt(toX, toY)
-  if targetPiece != nil and targetPiece.color == piece.color:
+  if targetPiece != nil and targetPiece.color == king.color:
     return false
+  
+  # Verificação especial para ROQUE
+  if king.kind == King and abs(toX - fromX) == 2 and toY == fromY:
+    return isValidCastling(king, fromX, fromY, toX, toY)
   
   # Aqui você pode adicionar validação específica por tipo de peça
   # Por enquanto, aceita qualquer movimento válido em termos de tabuleiro
@@ -82,41 +131,16 @@ proc evaluateCurrentPosition(): float =
   # Obter avaliação da posição atual
   let currentMoves = getBestMoves(gameState)
   if currentMoves.len > 0:
-    return currentMoves[0].score
+    # IMPORTANTE: O score do Stockfish é sempre do ponto de vista do jogador atual
+    # Precisamos normalizar para o ponto de vista das BRANCAS sempre
+    let rawScore = currentMoves[0].score
+    
+    if gameState.currentTurn == White:
+      return rawScore  # Se é turno das brancas, score positivo = vantagem branca
+    else:
+      return -rawScore  # Se é turno das pretas, invertemos: score positivo preto = vantagem preta (negativo para branco)
+  
   return 0.0
-
-proc isPathClear(fromX, toX, y: int): bool =
-  let start = min(fromX, toX) + 1
-  let finish = max(fromX, toX)
-  
-  for x in start..<finish:
-    if findPieceAt(x, y) != nil:
-      return false
-  return true
-
-proc handleCastling(king: Piece, fromX, toX: int): bool =
-  if king.kind != King or king.hasMoved:
-    return false
-    
-  # Roque é um movimento de 2 casas
-  if abs(toX - fromX) != 2:
-    return false
-    
-  let y = king.y
-  let rookX = if toX > fromX: 7 else: 0  # Torre da direita ou esquerda
-  let rook = findPieceAt(rookX, y)
-  
-  if rook == nil or rook.kind != Rook or rook.hasMoved:
-    return false
-    
-  if not isPathClear(fromX, rookX, y):
-    return false
-    
-  # Mover a torre
-  let newRookX = if toX > fromX: toX - 1 else: toX + 1
-  rook.x = newRookX
-  rook.hasMoved = true
-  return true
 
 proc handleInput*(squareSize: Vector2) =
   let mousePos = getMousePosition()
@@ -150,20 +174,6 @@ proc handleInput*(squareSize: Vector2) =
       let oldX = movingPiece.x
       let oldY = movingPiece.y
       
-      # Tentar fazer roque se for o rei
-      if movingPiece.kind == King and not movingPiece.hasMoved:
-        if handleCastling(movingPiece, oldX, gridX):
-          movingPiece.x = gridX
-          movingPiece.y = gridY
-          movingPiece.hasMoved = true
-          movingPiece.dragging = false
-          gameState.draggedPiece = nil
-          
-          # Trocar turno e analisar posição
-          gameState.currentTurn = if gameState.currentTurn == White: Dark else: White
-          gameState.suggestedMoves = getBestMoves(gameState)
-          return
-
       # Verificar se o movimento é válido
       if not isValidMove(movingPiece, oldX, oldY, gridX, gridY):
         movingPiece.dragging = false
@@ -176,27 +186,34 @@ proc handleInput*(squareSize: Vector2) =
       var captured = false
       var capturedPiece: Piece = nil
       
-      # Captura normal
-      let targetPiece = findPieceAt(gridX, gridY)
-      if targetPiece != nil and targetPiece.color != movingPiece.color:
-        let idx = findPieceIndex(targetPiece)
-        if idx >= 0:
-          capturedPiece = targetPiece
-          gameState.pieces.delete(idx)
-          captured = true
+      # Verificar se é ROQUE antes das outras lógicas
+      let isCastling = movingPiece.kind == King and abs(gridX - oldX) == 2
+      
+      if isCastling:
+        echo "Executando movimento de roque"
+        executeCastling(movingPiece, gridX)
+      else:
+        # Captura normal
+        let targetPiece = findPieceAt(gridX, gridY)
+        if targetPiece != nil and targetPiece.color != movingPiece.color:
+          let idx = findPieceIndex(targetPiece)
+          if idx >= 0:
+            capturedPiece = targetPiece
+            gameState.pieces.delete(idx)
+            captured = true
 
-      # Captura especial "en passant"
-      if movingPiece.kind == Pawn:
-        let direction = if movingPiece.color == White: -1 else: 1
-        let startRow = if movingPiece.color == White: 4 else: 3
-        if movingPiece.y == startRow and abs(gridX - movingPiece.x) == 1 and gridY == movingPiece.y + direction:
-          let sidePawn = findPieceAt(gridX, movingPiece.y)
-          if sidePawn != nil and sidePawn.kind == Pawn and sidePawn.color != movingPiece.color:
-            let idx = findPieceIndex(sidePawn)
-            if idx >= 0:
-              capturedPiece = sidePawn
-              gameState.pieces.delete(idx)
-              captured = true
+        # Captura especial "en passant"
+        if movingPiece.kind == Pawn:
+          let direction = if movingPiece.color == White: -1 else: 1
+          let startRow = if movingPiece.color == White: 4 else: 3
+          if movingPiece.y == startRow and abs(gridX - movingPiece.x) == 1 and gridY == movingPiece.y + direction:
+            let sidePawn = findPieceAt(gridX, movingPiece.y)
+            if sidePawn != nil and sidePawn.kind == Pawn and sidePawn.color != movingPiece.color:
+              let idx = findPieceIndex(sidePawn)
+              if idx >= 0:
+                capturedPiece = sidePawn
+                gameState.pieces.delete(idx)
+                captured = true
 
       # Fazer o movimento
       movingPiece.x = gridX
@@ -277,27 +294,82 @@ proc getBestBalancedMove*(): StockfishMove =
   if gameState.suggestedMoves.len == 0:
     return StockfishMove() # Retorna movimento vazio
     
-  var bestMove = gameState.suggestedMoves[0]
-  var bestBalance = abs(gameState.lastEvaluation + bestMove.score) # Soma porque o score é do ponto de vista do jogador atual
+  echo "=== BUSCANDO MOVIMENTO EQUILIBRADO ==="
+  echo "Vantagem atual das brancas: ", gameState.lastEvaluation
+  echo "Turno atual: ", gameState.currentTurn
   
-  echo "Procurando movimento mais equilibrado:"
-  echo "Vantagem atual: ", gameState.lastEvaluation
+  # Separar movimentos vantajosos dos desvantajosos
+  # IMPORTANTE: Para o jogador atual, score positivo = bom para ele
+  var advantageousMoves: seq[StockfishMove] = @[]
+  var disadvantageousMoves: seq[StockfishMove] = @[]
   
-  for i, move in gameState.suggestedMoves:
-    # A vantagem após este movimento seria: vantagem atual + score do movimento
-    let newAdvantage = gameState.lastEvaluation + move.score
-    let balance = abs(newAdvantage) # Quão próximo de 0 (equilibrado)
-    
-    echo "Move ", i+1, ": score=", move.score, " newAdvantage=", newAdvantage, " balance=", balance
-    
-    # Evitar movimentos claramente ruins (que dão muita vantagem ao oponente)
-    if move.score > -2.0: # Não perder mais que 2 pontos
+  for move in gameState.suggestedMoves:
+    if move.score >= 0.0: # Movimento bom para o jogador atual
+      advantageousMoves.add(move)
+      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
+      echo "Movimento VANTAJOSO para ", gameState.currentTurn, ": score=", move.score, " (para brancas: ", scoreForWhite, ")"
+    else: # Movimento ruim para o jogador atual
+      disadvantageousMoves.add(move)
+      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
+      echo "Movimento DESVANTAJOSO para ", gameState.currentTurn, ": score=", move.score, " (para brancas: ", scoreForWhite, ")"
+  
+  echo "Total - Vantajosos: ", advantageousMoves.len, " | Desvantajosos: ", disadvantageousMoves.len
+  
+  var bestMove: StockfishMove
+  var bestBalance: float = 999999.0 # Valor muito alto para começar
+  var foundMove = false
+  
+  # PRIORIDADE 1: Tentar encontrar movimento vantajoso que equilibre
+  if advantageousMoves.len > 0:
+    echo "=== ANALISANDO MOVIMENTOS VANTAJOSOS ==="
+    for i, move in advantageousMoves:
+      # Simular como ficaria a vantagem das brancas após este movimento
+      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
+      let newAdvantageForWhite = gameState.lastEvaluation + scoreForWhite
+      let balance = abs(newAdvantageForWhite) # Quão próximo de 0 (equilibrado)
+      
+      echo "Move ", i+1, " vantajoso: (", move.fromX, ",", move.fromY, ")->(", move.toX, ",", move.toY, ")"
+      echo "  Score para ", gameState.currentTurn, ": +", move.score
+      echo "  Score para brancas: ", scoreForWhite
+      echo "  Nova vantagem das brancas: ", newAdvantageForWhite, " | Equilíbrio: ", balance
+      
       if balance < bestBalance:
         bestBalance = balance
         bestMove = move
-        echo "Novo melhor movimento encontrado!"
+        foundMove = true
+        echo "  >>> NOVO MELHOR MOVIMENTO VANTAJOSO! <<<"
   
-  echo "Movimento escolhido: (", bestMove.fromX, ",", bestMove.fromY, ") -> (", bestMove.toX, ",", bestMove.toY, ")"
+  # PRIORIDADE 2: Se não há movimentos vantajosos, pegar o menos ruim
+  if not foundMove and disadvantageousMoves.len > 0:
+    echo "=== NÃO HÁ MOVIMENTOS VANTAJOSOS, ANALISANDO OS RUINS ==="
+    for i, move in disadvantageousMoves:
+      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
+      let newAdvantageForWhite = gameState.lastEvaluation + scoreForWhite
+      let balance = abs(newAdvantageForWhite)
+      
+      echo "Move ", i+1, " desvantajoso: (", move.fromX, ",", move.fromY, ")->(", move.toX, ",", move.toY, ")"
+      echo "  Score para ", gameState.currentTurn, ": ", move.score
+      echo "  Score para brancas: ", scoreForWhite  
+      echo "  Nova vantagem das brancas: ", newAdvantageForWhite, " | Equilíbrio: ", balance
+      
+      if balance < bestBalance:
+        bestBalance = balance
+        bestMove = move
+        foundMove = true
+        echo "  >>> MELHOR MOVIMENTO RUIM <<<"
+  
+  # FALLBACK: Se nada foi encontrado, usar o primeiro movimento
+  if not foundMove:
+    bestMove = gameState.suggestedMoves[0]
+    echo "=== USANDO MOVIMENTO FALLBACK ==="
+  
+  let finalScoreForWhite = if gameState.currentTurn == White: bestMove.score else: -bestMove.score
+  echo "MOVIMENTO FINAL ESCOLHIDO:"
+  echo "  De: (", bestMove.fromX, ",", bestMove.fromY, ") Para: (", bestMove.toX, ",", bestMove.toY, ")"
+  echo "  Score para ", gameState.currentTurn, ": ", bestMove.score
+  echo "  Score para brancas: ", finalScoreForWhite
+  echo "  Tipo: ", if bestMove.score >= 0.0: "VANTAJOSO" else: "DESVANTAJOSO"
+  
   result = bestMove
 
 proc getCurrentTurn*(): PieceColor = gameState.currentTurn
