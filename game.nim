@@ -294,83 +294,165 @@ proc getBestBalancedMove*(): StockfishMove =
   if gameState.suggestedMoves.len == 0:
     return StockfishMove() # Retorna movimento vazio
     
-  echo "=== BUSCANDO MOVIMENTO EQUILIBRADO ==="
+  echo "=== BUSCANDO MOVIMENTO EQUILIBRADO GRADUAL ==="
   echo "Vantagem atual das brancas: ", gameState.lastEvaluation
   echo "Turno atual: ", gameState.currentTurn
   
-  # Separar movimentos vantajosos dos desvantajosos
-  # IMPORTANTE: Para o jogador atual, score positivo = bom para ele
-  var advantageousMoves: seq[StockfishMove] = @[]
-  var disadvantageousMoves: seq[StockfishMove] = @[]
+  let currentAdvantage = gameState.lastEvaluation
+  let absAdvantage = abs(currentAdvantage)
   
-  for move in gameState.suggestedMoves:
-    if move.score >= 0.0: # Movimento bom para o jogador atual
-      advantageousMoves.add(move)
-      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
-      echo "Movimento VANTAJOSO para ", gameState.currentTurn, ": score=", move.score, " (para brancas: ", scoreForWhite, ")"
-    else: # Movimento ruim para o jogador atual
-      disadvantageousMoves.add(move)
-      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
-      echo "Movimento DESVANTAJOSO para ", gameState.currentTurn, ": score=", move.score, " (para brancas: ", scoreForWhite, ")"
+  # Definir zonas de vantagem
+  const 
+    BALANCED_ZONE = 0.5     # Zona considerada equilibrada
+    MODERATE_ZONE = 1.5     # Zona de vantagem moderada
+    HIGH_ZONE = 3.0         # Zona de alta vantagem
+    CRITICAL_ZONE = 5.0     # Zona crítica
   
-  echo "Total - Vantajosos: ", advantageousMoves.len, " | Desvantajosos: ", disadvantageousMoves.len
+  # Determinar estratégia baseada na vantagem atual
+  var targetReduction: float
+  var aggressiveness: float  # 0.0 = muito conservador, 1.0 = agressivo
   
+  if absAdvantage <= BALANCED_ZONE:
+    # Zona equilibrada: escolher o melhor movimento disponível
+    echo "ZONA EQUILIBRADA: Escolhendo melhor movimento"
+    targetReduction = 0.0
+    aggressiveness = 1.0
+  elif absAdvantage <= MODERATE_ZONE:
+    # Vantagem moderada: redução suave
+    echo "ZONA MODERADA: Redução suave"
+    targetReduction = absAdvantage * 0.2  # Reduzir 20%
+    aggressiveness = 0.8
+  elif absAdvantage <= HIGH_ZONE:
+    # Vantagem alta: redução mais significativa mas gradual
+    echo "ZONA ALTA: Redução gradual"
+    targetReduction = absAdvantage * 0.4  # Reduzir 40%
+    aggressiveness = 0.5
+  elif absAdvantage <= CRITICAL_ZONE:
+    # Vantagem muito alta: redução forte mas ainda controlada
+    echo "ZONA CRÍTICA: Redução controlada"
+    targetReduction = absAdvantage * 0.6  # Reduzir 60%
+    aggressiveness = 0.3
+  else:
+    # Vantagem extrema: redução agressiva
+    echo "ZONA EXTREMA: Redução agressiva"
+    targetReduction = absAdvantage * 0.8  # Reduzir 80%
+    aggressiveness = 0.1
+  
+  # Calcular vantagem alvo após o movimento
+  var targetAdvantage: float
+  if currentAdvantage > 0:
+    targetAdvantage = currentAdvantage - targetReduction
+  else:
+    targetAdvantage = currentAdvantage + targetReduction
+  
+  echo "Vantagem alvo: ", targetAdvantage
+  echo "Redução desejada: ", targetReduction
+  echo "Agressividade: ", aggressiveness
+  
+  # Análise dos movimentos com scoring ponderado
   var bestMove: StockfishMove
-  var bestBalance: float = 999999.0 # Valor muito alto para começar
+  var bestScore: float = -999999.0
   var foundMove = false
   
-  # PRIORIDADE 1: Tentar encontrar movimento vantajoso que equilibre
-  if advantageousMoves.len > 0:
-    echo "=== ANALISANDO MOVIMENTOS VANTAJOSOS ==="
-    for i, move in advantageousMoves:
-      # Simular como ficaria a vantagem das brancas após este movimento
-      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
-      let newAdvantageForWhite = gameState.lastEvaluation + scoreForWhite
-      let balance = abs(newAdvantageForWhite) # Quão próximo de 0 (equilibrado)
-      
-      echo "Move ", i+1, " vantajoso: (", move.fromX, ",", move.fromY, ")->(", move.toX, ",", move.toY, ")"
-      echo "  Score para ", gameState.currentTurn, ": +", move.score
-      echo "  Score para brancas: ", scoreForWhite
-      echo "  Nova vantagem das brancas: ", newAdvantageForWhite, " | Equilíbrio: ", balance
-      
-      if balance < bestBalance:
-        bestBalance = balance
-        bestMove = move
-        foundMove = true
-        echo "  >>> NOVO MELHOR MOVIMENTO VANTAJOSO! <<<"
+  for i, move in gameState.suggestedMoves:
+    # Calcular vantagem resultante deste movimento
+    let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
+    let newAdvantageForWhite = gameState.lastEvaluation + scoreForWhite
+    
+    # Calcular quão próximo este movimento nos leva do alvo
+    let distanceFromTarget = abs(newAdvantageForWhite - targetAdvantage)
+    
+    # Penalizar movimentos que se afastam muito do alvo
+    let targetScore = 1.0 / (1.0 + distanceFromTarget)
+    
+    # Considerar qualidade intrínseca do movimento (com peso baseado na agressividade)
+    let intrinsicScore = if move.score >= 0: move.score else: move.score * 0.5
+    let qualityScore = intrinsicScore * aggressiveness
+    
+    # Score final combinado (60% alvo, 40% qualidade)
+    let combinedScore = targetScore * 0.6 + qualityScore * 0.4
+    
+    echo "Move ", i+1, ": (", move.fromX, ",", move.fromY, ")->(", move.toX, ",", move.toY, ")"
+    echo "  Score bruto: ", move.score
+    echo "  Nova vantagem: ", newAdvantageForWhite
+    echo "  Distância do alvo: ", distanceFromTarget
+    echo "  Score alvo: ", targetScore
+    echo "  Score qualidade: ", qualityScore
+    echo "  Score combinado: ", combinedScore
+    
+    if combinedScore > bestScore:
+      bestScore = combinedScore
+      bestMove = move
+      foundMove = true
+      echo "  >>> NOVO MELHOR MOVIMENTO! <<<"
   
-  # PRIORIDADE 2: Se não há movimentos vantajosos, pegar o menos ruim
-  if not foundMove and disadvantageousMoves.len > 0:
-    echo "=== NÃO HÁ MOVIMENTOS VANTAJOSOS, ANALISANDO OS RUINS ==="
-    for i, move in disadvantageousMoves:
-      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
-      let newAdvantageForWhite = gameState.lastEvaluation + scoreForWhite
-      let balance = abs(newAdvantageForWhite)
-      
-      echo "Move ", i+1, " desvantajoso: (", move.fromX, ",", move.fromY, ")->(", move.toX, ",", move.toY, ")"
-      echo "  Score para ", gameState.currentTurn, ": ", move.score
-      echo "  Score para brancas: ", scoreForWhite  
-      echo "  Nova vantagem das brancas: ", newAdvantageForWhite, " | Equilíbrio: ", balance
-      
-      if balance < bestBalance:
-        bestBalance = balance
-        bestMove = move
-        foundMove = true
-        echo "  >>> MELHOR MOVIMENTO RUIM <<<"
-  
-  # FALLBACK: Se nada foi encontrado, usar o primeiro movimento
+  # Fallback: se nenhum movimento foi avaliado adequadamente
   if not foundMove:
-    bestMove = gameState.suggestedMoves[0]
-    echo "=== USANDO MOVIMENTO FALLBACK ==="
+    echo "=== USANDO FALLBACK ==="
+    # Em caso de emergência, escolher movimento que não piore muito
+    var safestMove = gameState.suggestedMoves[0]
+    var smallestWorsening = 999999.0
+    
+    for move in gameState.suggestedMoves:
+      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
+      let newAdvantage = gameState.lastEvaluation + scoreForWhite
+      let worsening = abs(newAdvantage) - absAdvantage
+      
+      if worsening < smallestWorsening:
+        smallestWorsening = worsening
+        safestMove = move
+    
+    bestMove = safestMove
   
   let finalScoreForWhite = if gameState.currentTurn == White: bestMove.score else: -bestMove.score
+  let finalNewAdvantage = gameState.lastEvaluation + finalScoreForWhite
+  
   echo "MOVIMENTO FINAL ESCOLHIDO:"
   echo "  De: (", bestMove.fromX, ",", bestMove.fromY, ") Para: (", bestMove.toX, ",", bestMove.toY, ")"
-  echo "  Score para ", gameState.currentTurn, ": ", bestMove.score
-  echo "  Score para brancas: ", finalScoreForWhite
-  echo "  Tipo: ", if bestMove.score >= 0.0: "VANTAJOSO" else: "DESVANTAJOSO"
+  echo "  Score bruto: ", bestMove.score
+  echo "  Vantagem atual: ", gameState.lastEvaluation
+  echo "  Nova vantagem: ", finalNewAdvantage
+  echo "  Mudança na vantagem: ", finalNewAdvantage - gameState.lastEvaluation
   
   result = bestMove
 
+# Função adicional para análise pós-movimento (opcional)
+proc analyzeMovementTrend*(): string =
+  let advantage = gameState.lastEvaluation
+  let absAdvantage = abs(advantage)
+  
+  if absAdvantage <= 0.5:
+    return "Posição equilibrada"
+  elif absAdvantage <= 1.5:
+    return "Vantagem leve para " & (if advantage > 0: "brancas" else: "pretas")
+  elif absAdvantage <= 3.0:
+    return "Vantagem clara para " & (if advantage > 0: "brancas" else: "pretas")
+  elif absAdvantage <= 5.0:
+    return "Grande vantagem para " & (if advantage > 0: "brancas" else: "pretas")
+  else:
+    return "Vantagem decisiva para " & (if advantage > 0: "brancas" else: "pretas")
+
+# Função para sugerir estratégia baseada na posição
+proc getStrategySuggestion*(): string =
+  let advantage = gameState.lastEvaluation
+  let absAdvantage = abs(advantage)
+  let isMyTurn = (advantage > 0 and gameState.currentTurn == White) or 
+                 (advantage < 0 and gameState.currentTurn == Dark)
+  
+  if absAdvantage <= 0.5:
+    return "Mantenha o equilíbrio, busque pequenas vantagens"
+  elif isMyTurn:
+    if absAdvantage <= 1.5:
+      return "Tente expandir sua vantagem gradualmente"
+    else:
+      return "Consolide sua vantagem, evite riscos desnecessários"
+  else:
+    if absAdvantage <= 1.5:
+      return "Busque contraforte, mas mantenha a estabilidade"
+    elif absAdvantage <= 3.0:
+      return "Procure por táticas para inverter a situação"
+    else:
+      return "Busque complicações e oportunidades táticas"
+    
 proc getCurrentTurn*(): PieceColor = gameState.currentTurn
 proc getCurrentAdvantage*(): float = gameState.lastEvaluation
