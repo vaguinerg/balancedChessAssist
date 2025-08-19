@@ -1,9 +1,42 @@
 import raylib
 import types
 import stockfish
+import math
+import random
+import times
 
 var gameState = GameState(pieces: @[], flipped: false)
 var pendingPromotion: Piece = nil
+
+# Configurações de humanização
+type
+  HumanizationConfig = object
+    thinkingTimeMin: float      # Tempo mínimo para "pensar"
+    thinkingTimeMax: float      # Tempo máximo para "pensar"
+    blunderChance: float        # Chance de cometer erro (0.0-1.0)
+    inaccuracyFactor: float     # Fator de imprecisão (0.0-1.0)
+    preferComplexity: float     # Preferência por jogadas mais complexas
+    openingBookDepth: int       # Profundidade do livro de aberturas
+    endgameAccuracy: float      # Precisão no final do jogo
+
+var humanConfig = HumanizationConfig(
+  thinkingTimeMin: 1.0,
+  thinkingTimeMax: 8.0,
+  blunderChance: 0.08,         # 8% de chance de erro
+  inaccuracyFactor: 0.15,      # 15% de imprecisão
+  preferComplexity: 0.3,       # 30% de preferência por complexidade
+  openingBookDepth: 12,
+  endgameAccuracy: 0.85        # 85% de precisão no endgame
+)
+
+# Variáveis para controle temporal
+var lastMoveTime: float = 0.0
+var isThinking: bool = false
+var thinkingStartTime: float = 0.0
+var plannedThinkingTime: float = 0.0
+
+proc getCurrentTime(): float =
+  return float(epochTime())
 
 proc initializeGame*() =
   gameState.pieces = @[]
@@ -12,8 +45,10 @@ proc initializeGame*() =
   gameState.lastEvaluation = 0.0
   gameState.suggestedMoves = @[]
   gameState.promotionButtons = @[]
+  lastMoveTime = getCurrentTime()
+  isThinking = false
   
-  # Setup initial pieces
+  # Setup inicial das peças
   let pieceSetup = [
     (Rook, 0), (Knight, 1), (Bishop, 2), (Queen, 3),
     (King, 4), (Bishop, 5), (Knight, 6), (Rook, 7)
@@ -27,6 +62,150 @@ proc initializeGame*() =
     gameState.pieces.add(Piece(kind: Pawn, color: Dark, x: x, y: 1))
     gameState.pieces.add(Piece(kind: Pawn, color: White, x: x, y: 6))
 
+proc findPieceAt(x, y: int): Piece =
+  for piece in gameState.pieces:
+    if piece.x == x and piece.y == y:
+      return piece
+  return nil
+
+proc getGamePhase(): float =
+  # Determina a fase do jogo baseado no material restante
+  var materialCount = 0
+  for piece in gameState.pieces:
+    case piece.kind:
+    of Queen: materialCount += 9
+    of Rook: materialCount += 5
+    of Bishop, Knight: materialCount += 3
+    of Pawn: materialCount += 1
+    of King: discard
+  
+  # 0.0 = opening, 0.5 = middlegame, 1.0 = endgame
+  let maxMaterial = 78 # Material inicial (sem reis)
+  return 1.0 - (float(materialCount) / float(maxMaterial))
+
+proc calculateMoveComplexity(move: StockfishMove): float =
+  # Calcular complexidade baseada em vários fatores
+  var complexity = 0.0
+  
+  let movingPiece = findPieceAt(move.fromX, move.fromY)
+  if movingPiece != nil:
+    # Movimentos de peças menores são mais "humanos"
+    case movingPiece.kind:
+    of Pawn: complexity += 0.1
+    of Knight: complexity += 0.3
+    of Bishop: complexity += 0.2
+    of Rook: complexity += 0.2
+    of Queen: complexity += 0.4
+    of King: complexity += 0.1
+  
+  # Movimentos para o centro são preferidos por humanos
+  let centerDistance = abs(move.toX.float64 - 3.5) + abs(move.toY.float64 - 3.5)
+  complexity += (7.0 - centerDistance) * 0.05
+  
+  # Capturas são mais óbvias (menor complexidade para humanos)
+  let targetPiece = findPieceAt(move.toX, move.toY)
+  if targetPiece != nil:
+    complexity -= 0.2
+  
+  return complexity
+
+proc addHumanError(score: float, gamePhase: float): float =
+  # Adiciona erro humano baseado na fase do jogo
+  let errorMagnitude = humanConfig.inaccuracyFactor * (1.0 - gamePhase * humanConfig.endgameAccuracy)
+  let randomError = (rand(2.0) - 1.0) * errorMagnitude * abs(score)
+  return score + randomError
+
+proc shouldBlunder(gamePhase: float): bool =
+  # Chance de blunder reduzida no endgame
+  let adjustedChance = humanConfig.blunderChance * (1.0 - gamePhase * 0.5)
+  return rand(1.0) < adjustedChance
+
+proc getHumanizedMove(): StockfishMove =
+  if gameState.suggestedMoves.len == 0:
+    return StockfishMove()
+  
+  let gamePhase = getGamePhase()
+  
+  # Verificar se deve cometer um blunder
+  if shouldBlunder(gamePhase) and gameState.suggestedMoves.len > 3:
+    echo "=== BLUNDER INTENCIONAL ==="
+    # Escolher um movimento entre os 30% piores, mas não o pior absoluto
+    let worstIndex = max(2, int(float(gameState.suggestedMoves.len) * 0.7))
+    let blunderMove = gameState.suggestedMoves[rand(worstIndex..<gameState.suggestedMoves.len)]
+    echo "Escolhendo blunder: posição ", worstIndex, " de ", gameState.suggestedMoves.len
+    return blunderMove
+  
+  # Análise normal com fatores humanos
+  var bestMove: StockfishMove
+  var bestScore: float = -999999.0
+  
+  # Limitar análise aos top 5 movimentos (comportamento mais humano)
+  let analysisDepth = min(5, gameState.suggestedMoves.len)
+  
+  for i in 0..<analysisDepth:
+    let move = gameState.suggestedMoves[i]
+    
+    # Score base com erro humano
+    var humanScore = addHumanError(move.score, gamePhase)
+    
+    # Fator de complexidade
+    let complexity = calculateMoveComplexity(move)
+    let complexityBonus = complexity * humanConfig.preferComplexity * (1.0 - gamePhase)
+    humanScore += complexityBonus
+    
+    # Penalizar ligeiramente movimentos muito óbvios (rank 0)
+    if i == 0:
+      humanScore -= 0.1
+    
+    # Bonus aleatório pequeno para simular "intuição"
+    let intuitionBonus = (rand(0.3) - 0.15)
+    humanScore += intuitionBonus
+    
+    echo "Move ", i+1, ": score=", move.score, " humanScore=", humanScore, " complexity=", complexity
+    
+    if humanScore > bestScore:
+      bestScore = humanScore
+      bestMove = move
+  
+  echo "=== MOVIMENTO HUMANIZADO ESCOLHIDO ==="
+  echo "De: (", bestMove.fromX, ",", bestMove.fromY, ") Para: (", bestMove.toX, ",", bestMove.toY, ")"
+  echo "Score original: ", bestMove.score
+  echo "Fase do jogo: ", gamePhase
+  
+  return bestMove
+
+proc startThinking() =
+  isThinking = true
+  thinkingStartTime = getCurrentTime()
+  
+  # Tempo de pensamento baseado na complexidade da posição
+  let gamePhase = getGamePhase()
+  let baseTime = humanConfig.thinkingTimeMin + 
+                (humanConfig.thinkingTimeMax - humanConfig.thinkingTimeMin) * gamePhase
+  
+  # Adicionar variação aleatória
+  let timeVariation = rand(2.0) - 1.0  # -1 a +1
+  plannedThinkingTime = baseTime + timeVariation
+  
+  # Garantir limites
+  plannedThinkingTime = max(humanConfig.thinkingTimeMin, 
+                           min(humanConfig.thinkingTimeMax, plannedThinkingTime))
+  
+  echo "Iniciando período de reflexão: ", plannedThinkingTime, " segundos"
+
+proc isThinkingComplete(): bool =
+  if not isThinking:
+    return true
+  
+  let elapsedTime = getCurrentTime() - thinkingStartTime
+  return elapsedTime >= plannedThinkingTime
+
+proc finishThinking() =
+  isThinking = false
+  echo "Período de reflexão concluído"
+
+# [Resto das funções permanecem iguais: getAdjustedGridPosition, findPieceAt, etc.]
+
 proc getAdjustedGridPosition(mousePos: Vector2, squareSize: Vector2): tuple[x, y: int] =
   let rawX = int(mousePos.x / squareSize.x)
   let rawY = int(mousePos.y / squareSize.y)
@@ -35,12 +214,6 @@ proc getAdjustedGridPosition(mousePos: Vector2, squareSize: Vector2): tuple[x, y
     result = (x: 7 - rawX, y: 7 - rawY)
   else:
     result = (x: rawX, y: rawY)
-
-proc findPieceAt(x, y: int): Piece =
-  for piece in gameState.pieces:
-    if piece.x == x and piece.y == y:
-      return piece
-  return nil
 
 proc findPieceIndex(piece: Piece): int =
   for i in 0..<gameState.pieces.len:
@@ -65,81 +238,56 @@ proc createPromotionButtons(piece: Piece) =
     ))
 
 proc isValidCastling(king: Piece, fromX, fromY, toX, toY: int): bool =
-  # Verificar se é roque (rei move 2 casas horizontalmente)
   if abs(toX - fromX) != 2 or toY != fromY:
     return false
   
-  # Determinar se é roque do lado do rei (kingside) ou da rainha (queenside)
   let isKingside = toX > fromX
   let rookX = if isKingside: 7 else: 0
   let rookNewX = if isKingside: toX - 1 else: toX + 1
   
-  # Verificar se a torre está na posição correta
   let rook = findPieceAt(rookX, fromY)
   if rook == nil or rook.kind != Rook or rook.color != king.color:
-    echo "Roque inválido: torre não encontrada em (", rookX, ",", fromY, ")"
     return false
   
-  # Verificar se o caminho está livre
   let startX = min(fromX, rookX) + 1
   let endX = max(fromX, rookX) - 1
   
   for x in startX..endX:
     if findPieceAt(x, fromY) != nil:
-      echo "Roque inválido: caminho bloqueado em (", x, ",", fromY, ")"
       return false
   
-  # TODO: Verificar se rei ou torre já se moveram (precisaria de histórico)
-  # TODO: Verificar se rei está em xeque ou passa por casa atacada
-  
-  echo "Roque válido detectado: ", if isKingside: "lado do rei" else: "lado da rainha"
   return true
 
 proc executeCastling(king: Piece, toX: int) =
-  # Determinar posições da torre
   let isKingside = toX > king.x
   let rookX = if isKingside: 7 else: 0
   let rookNewX = if isKingside: toX - 1 else: toX + 1
   
-  # Encontrar a torre
   let rook = findPieceAt(rookX, king.y)
   if rook != nil:
-    echo "Executando roque: Torre de (", rookX, ",", king.y, ") para (", rookNewX, ",", king.y, ")"
     rook.x = rookNewX
-  else:
-    echo "ERRO: Torre não encontrada durante execução do roque!"
 
-proc isValidMove(king: Piece, fromX, fromY, toX, toY: int): bool =
-  # Verificação básica de limites
+proc isValidMove(piece: Piece, fromX, fromY, toX, toY: int): bool =
   if toX < 0 or toX > 7 or toY < 0 or toY > 7:
     return false
   
-  # Não pode mover para onde já tem peça da mesma cor
   let targetPiece = findPieceAt(toX, toY)
-  if targetPiece != nil and targetPiece.color == king.color:
+  if targetPiece != nil and targetPiece.color == piece.color:
     return false
   
-  # Verificação especial para ROQUE
-  if king.kind == King and abs(toX - fromX) == 2 and toY == fromY:
-    return isValidCastling(king, fromX, fromY, toX, toY)
+  if piece.kind == King and abs(toX - fromX) == 2 and toY == fromY:
+    return isValidCastling(piece, fromX, fromY, toX, toY)
   
-  # Aqui você pode adicionar validação específica por tipo de peça
-  # Por enquanto, aceita qualquer movimento válido em termos de tabuleiro
   return true
 
 proc evaluateCurrentPosition(): float =
-  # Obter avaliação da posição atual
   let currentMoves = getBestMoves(gameState)
   if currentMoves.len > 0:
-    # IMPORTANTE: O score do Stockfish é sempre do ponto de vista do jogador atual
-    # Precisamos normalizar para o ponto de vista das BRANCAS sempre
     let rawScore = currentMoves[0].score
-    
     if gameState.currentTurn == White:
-      return rawScore  # Se é turno das brancas, score positivo = vantagem branca
+      return rawScore
     else:
-      return -rawScore  # Se é turno das pretas, invertemos: score positivo preto = vantagem preta (negativo para branco)
-  
+      return -rawScore
   return 0.0
 
 proc handleInput*(squareSize: Vector2) =
@@ -174,26 +322,20 @@ proc handleInput*(squareSize: Vector2) =
       let oldX = movingPiece.x
       let oldY = movingPiece.y
       
-      # Verificar se o movimento é válido
       if not isValidMove(movingPiece, oldX, oldY, gridX, gridY):
         movingPiece.dragging = false
         gameState.draggedPiece = nil
         return
       
-      # Avaliar posição antes do movimento
       let positionBeforeMove = evaluateCurrentPosition()
-      
       var captured = false
       var capturedPiece: Piece = nil
       
-      # Verificar se é ROQUE antes das outras lógicas
       let isCastling = movingPiece.kind == King and abs(gridX - oldX) == 2
       
       if isCastling:
-        echo "Executando movimento de roque"
         executeCastling(movingPiece, gridX)
       else:
-        # Captura normal
         let targetPiece = findPieceAt(gridX, gridY)
         if targetPiece != nil and targetPiece.color != movingPiece.color:
           let idx = findPieceIndex(targetPiece)
@@ -202,7 +344,7 @@ proc handleInput*(squareSize: Vector2) =
             gameState.pieces.delete(idx)
             captured = true
 
-        # Captura especial "en passant"
+        # En passant
         if movingPiece.kind == Pawn:
           let direction = if movingPiece.color == White: -1 else: 1
           let startRow = if movingPiece.color == White: 4 else: 3
@@ -215,45 +357,32 @@ proc handleInput*(squareSize: Vector2) =
                 gameState.pieces.delete(idx)
                 captured = true
 
-      # Fazer o movimento
       movingPiece.x = gridX
       movingPiece.y = gridY
       movingPiece.dragging = false
       gameState.draggedPiece = nil
 
-      # Promoção de peão
+      # Promoção
       if movingPiece.kind == Pawn:
         let lastRow = if movingPiece.color == White: 0 else: 7
         if movingPiece.y == lastRow:
           pendingPromotion = movingPiece
           createPromotionButtons(movingPiece)
-          return # Não continua o processamento até escolher a promoção
+          return
 
-      # Verificar se realmente houve movimento
       if movingPiece.x != oldX or movingPiece.y != oldY:
-        echo "Movimento realizado: (", oldX, ",", oldY, ") -> (", gridX, ",", gridY, ")"
-        
-        # Avaliar posição depois do movimento (mantendo o mesmo turno temporariamente)
         let positionAfterMove = evaluateCurrentPosition()
         let moveAdvantage = positionAfterMove - positionBeforeMove
         
-        echo "Vantagem antes: ", positionBeforeMove
-        echo "Vantagem depois: ", positionAfterMove  
-        echo "Diferença do movimento: ", moveAdvantage
-        
-        # Agora trocar o turno para obter os movimentos do oponente
         gameState.currentTurn = if gameState.currentTurn == White: Dark else: White
         gameState.lastEvaluation = positionAfterMove
         
-        # Obter os melhores movimentos do oponente
+        # Iniciar período de "pensamento" para o próximo movimento
+        startThinking()
+        
         gameState.suggestedMoves = getBestMoves(gameState)
-        
-        echo "Turno atual: ", gameState.currentTurn
-        echo "Avaliação atual: ", gameState.lastEvaluation
-        echo "Moves sugeridos para o oponente: ", gameState.suggestedMoves.len
-        
-        for i, move in gameState.suggestedMoves:
-          echo "Move ", i+1, ": (", move.fromX, ",", move.fromY, ") -> (", move.toX, ",", move.toY, ") score: ", move.score
+
+# [Resto das funções auxiliares permanecem iguais]
 
 proc getBoardPosition*(x, y: int): Vector2 =
   let squareSize = Vector2(
@@ -283,141 +412,27 @@ proc getBoardCenter*(x, y: int): Vector2 =
   )
 
 proc isFlipped*(): bool = gameState.flipped
-
 proc getPieces*(): seq[Piece] = gameState.pieces
-
 proc isPromotionPending*(): bool = pendingPromotion != nil
 proc getPromotionPiece*(): Piece = pendingPromotion
 proc getPromotionButtons*(): seq[PromotionButton] = gameState.promotionButtons
+proc getCurrentTurn*(): PieceColor = gameState.currentTurn
+proc getCurrentAdvantage*(): float = gameState.lastEvaluation
+proc isCurrentlyThinking*(): bool = isThinking
 
+# Função principal para obter movimento humanizado
 proc getBestBalancedMove*(): StockfishMove =
-  if gameState.suggestedMoves.len == 0:
-    return StockfishMove() # Retorna movimento vazio
-    
-  echo "=== BUSCANDO MOVIMENTO EQUILIBRADO GRADUAL ==="
-  echo "Vantagem atual das brancas: ", gameState.lastEvaluation
-  echo "Turno atual: ", gameState.currentTurn
+  # Se ainda está "pensando", retornar movimento vazio
+  if not isThinkingComplete():
+    return StockfishMove()
   
-  let currentAdvantage = gameState.lastEvaluation
-  let absAdvantage = abs(currentAdvantage)
+  # Finalizar período de pensamento
+  if isThinking:
+    finishThinking()
   
-  # Definir zonas de vantagem
-  const 
-    BALANCED_ZONE = 0.5     # Zona considerada equilibrada
-    MODERATE_ZONE = 1.5     # Zona de vantagem moderada
-    HIGH_ZONE = 3.0         # Zona de alta vantagem
-    CRITICAL_ZONE = 5.0     # Zona crítica
-  
-  # Determinar estratégia baseada na vantagem atual
-  var targetReduction: float
-  var aggressiveness: float  # 0.0 = muito conservador, 1.0 = agressivo
-  
-  if absAdvantage <= BALANCED_ZONE:
-    # Zona equilibrada: escolher o melhor movimento disponível
-    echo "ZONA EQUILIBRADA: Escolhendo melhor movimento"
-    targetReduction = 0.0
-    aggressiveness = 1.0
-  elif absAdvantage <= MODERATE_ZONE:
-    # Vantagem moderada: redução suave
-    echo "ZONA MODERADA: Redução suave"
-    targetReduction = absAdvantage * 0.2  # Reduzir 20%
-    aggressiveness = 0.8
-  elif absAdvantage <= HIGH_ZONE:
-    # Vantagem alta: redução mais significativa mas gradual
-    echo "ZONA ALTA: Redução gradual"
-    targetReduction = absAdvantage * 0.4  # Reduzir 40%
-    aggressiveness = 0.5
-  elif absAdvantage <= CRITICAL_ZONE:
-    # Vantagem muito alta: redução forte mas ainda controlada
-    echo "ZONA CRÍTICA: Redução controlada"
-    targetReduction = absAdvantage * 0.6  # Reduzir 60%
-    aggressiveness = 0.3
-  else:
-    # Vantagem extrema: redução agressiva
-    echo "ZONA EXTREMA: Redução agressiva"
+  # Retornar movimento humanizado
+  return getHumanizedMove()
 
-    targetReduction = absAdvantage * 0.8  # Reduzir 80%
-    aggressiveness = 0.1
-  
-  # Calcular vantagem alvo após o movimento
-  var targetAdvantage: float
-  if currentAdvantage > 0:
-    targetAdvantage = currentAdvantage - targetReduction
-  else:
-    targetAdvantage = currentAdvantage + targetReduction
-  
-  echo "Vantagem alvo: ", targetAdvantage
-  echo "Redução desejada: ", targetReduction
-  echo "Agressividade: ", aggressiveness
-  
-  # Análise dos movimentos com scoring ponderado
-  var bestMove: StockfishMove
-  var bestScore: float = -999999.0
-  var foundMove = false
-  
-  for i, move in gameState.suggestedMoves:
-    # Calcular vantagem resultante deste movimento
-    let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
-    let newAdvantageForWhite = gameState.lastEvaluation + scoreForWhite
-    
-    # Calcular quão próximo este movimento nos leva do alvo
-    let distanceFromTarget = abs(newAdvantageForWhite - targetAdvantage)
-    
-    # Penalizar movimentos que se afastam muito do alvo
-    let targetScore = 1.0 / (1.0 + distanceFromTarget)
-    
-    # Considerar qualidade intrínseca do movimento (com peso baseado na agressividade)
-    let intrinsicScore = if move.score >= 0: move.score else: move.score * 0.5
-    let qualityScore = intrinsicScore * aggressiveness
-    
-    # Score final combinado (60% alvo, 40% qualidade)
-    let combinedScore = targetScore * 0.6 + qualityScore * 0.4
-    
-    echo "Move ", i+1, ": (", move.fromX, ",", move.fromY, ")->(", move.toX, ",", move.toY, ")"
-    echo "  Score bruto: ", move.score
-    echo "  Nova vantagem: ", newAdvantageForWhite
-    echo "  Distância do alvo: ", distanceFromTarget
-    echo "  Score alvo: ", targetScore
-    echo "  Score qualidade: ", qualityScore
-    echo "  Score combinado: ", combinedScore
-    
-    if combinedScore > bestScore:
-      bestScore = combinedScore
-      bestMove = move
-      foundMove = true
-      echo "  >>> NOVO MELHOR MOVIMENTO! <<<"
-  
-  # Fallback: se nenhum movimento foi avaliado adequadamente
-  if not foundMove:
-    echo "=== USANDO FALLBACK ==="
-    # Em caso de emergência, escolher movimento que não piore muito
-    var safestMove = gameState.suggestedMoves[0]
-    var smallestWorsening = 999999.0
-    
-    for move in gameState.suggestedMoves:
-      let scoreForWhite = if gameState.currentTurn == White: move.score else: -move.score
-      let newAdvantage = gameState.lastEvaluation + scoreForWhite
-      let worsening = abs(newAdvantage) - absAdvantage
-      
-      if worsening < smallestWorsening:
-        smallestWorsening = worsening
-        safestMove = move
-    
-    bestMove = safestMove
-  
-  let finalScoreForWhite = if gameState.currentTurn == White: bestMove.score else: -bestMove.score
-  let finalNewAdvantage = gameState.lastEvaluation + finalScoreForWhite
-  
-  echo "MOVIMENTO FINAL ESCOLHIDO:"
-  echo "  De: (", bestMove.fromX, ",", bestMove.fromY, ") Para: (", bestMove.toX, ",", bestMove.toY, ")"
-  echo "  Score bruto: ", bestMove.score
-  echo "  Vantagem atual: ", gameState.lastEvaluation
-  echo "  Nova vantagem: ", finalNewAdvantage
-  echo "  Mudança na vantagem: ", finalNewAdvantage - gameState.lastEvaluation
-  
-  result = bestMove
-
-# Função adicional para análise pós-movimento (opcional)
 proc analyzeMovementTrend*(): string =
   let advantage = gameState.lastEvaluation
   let absAdvantage = abs(advantage)
@@ -433,27 +448,29 @@ proc analyzeMovementTrend*(): string =
   else:
     return "Vantagem decisiva para " & (if advantage > 0: "brancas" else: "pretas")
 
-# Função para sugerir estratégia baseada na posição
 proc getStrategySuggestion*(): string =
   let advantage = gameState.lastEvaluation
   let absAdvantage = abs(advantage)
   let isMyTurn = (advantage > 0 and gameState.currentTurn == White) or 
                  (advantage < 0 and gameState.currentTurn == Dark)
   
+  if isThinking:
+    return "Analisando posição..."
+  
   if absAdvantage <= 0.5:
-    return "Mantenha o equilíbrio, busque pequenas vantagens"
+    return "Posição equilibrada - buscando pequenas vantagens"
   elif isMyTurn:
     if absAdvantage <= 1.5:
-      return "Tente expandir sua vantagem gradualmente"
+      return "Expandindo vantagem gradualmente"
     else:
-      return "Consolide sua vantagem, evite riscos desnecessários"
+      return "Consolidando vantagem com segurança"
   else:
     if absAdvantage <= 1.5:
-      return "Busque contraforte, mas mantenha a estabilidade"
+      return "Buscando contraforte"
     elif absAdvantage <= 3.0:
-      return "Procure por táticas para inverter a situação"
+      return "Procurando por táticas"
     else:
-      return "Busque complicações e oportunidades táticas"
+      return "Buscando complicações para reverter"
 
-proc getCurrentTurn*(): PieceColor = gameState.currentTurn
-proc getCurrentAdvantage*(): float = gameState.lastEvaluation
+# Adicionar após as outras funções de get
+proc getSuggestedMoves*(): seq[StockfishMove] = gameState.suggestedMoves

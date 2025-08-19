@@ -4,6 +4,7 @@ import game
 import types
 import board
 import strformat
+import renderer
 
 setTraceLogLevel(None)
 setConfigFlags(flags(WindowResizable, Msaa4xHint, VsyncHint))
@@ -72,5 +73,7 @@ while not windowShouldClose():
                     3.0,
                     Color(r: 0, g: 255, b: 0, a: 128)
                 )
+        
+        drawAllSuggestedMoves()
 
 closeWindow()
