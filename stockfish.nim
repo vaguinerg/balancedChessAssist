@@ -56,7 +56,7 @@ proc analyzePosition*(fen: string, depth: int = 15): tuple[evaluation: float, mo
     
     # Enviar comandos
     input.writeLine("position fen " & fen)
-    input.writeLine("setoption name MultiPV value 5")
+    input.writeLine("setoption name MultiPV value 10")
     input.writeLine("go depth " & $depth)
     input.flush()
     

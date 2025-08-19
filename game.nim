@@ -335,6 +335,7 @@ proc getBestBalancedMove*(): StockfishMove =
   else:
     # Vantagem extrema: redução agressiva
     echo "ZONA EXTREMA: Redução agressiva"
+
     targetReduction = absAdvantage * 0.8  # Reduzir 80%
     aggressiveness = 0.1
   
@@ -453,6 +454,6 @@ proc getStrategySuggestion*(): string =
       return "Procure por táticas para inverter a situação"
     else:
       return "Busque complicações e oportunidades táticas"
-    
+
 proc getCurrentTurn*(): PieceColor = gameState.currentTurn
 proc getCurrentAdvantage*(): float = gameState.lastEvaluation
